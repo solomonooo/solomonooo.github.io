@@ -169,7 +169,7 @@ template<typename _Res>
     ...
   };
 ```
-现在就比较清晰了，`__future_base`定义了`_Result`结构用于存储数据，同时定义了`_State_base` (老版本的gcc, 比如4.8.2, 使用`__State_base`, 新版本的gcc则重新设计了`__State_baseV2`), `__State_base`用于封装`Result`的unique_ptr `_M_result`，同步用的锁`_M_status`，以及一些flag。
+现在就比较清晰了，`__future_base`定义了`_Result`结构用于存储数据，同时定义了`_State_base` (老版本的gcc, 比如4.8.2, 使用`_State_base`, 新版本的gcc则重新设计了`_State_baseV2`), `_State_base`用于封装`Result`的unique_ptr `_M_result`，同步用的锁`_M_status`，以及一些flag。
 
 上文已经提到了，`future`获取数据实际是依靠`_State_base`的`wait()`去拿到真正的数据的。
 ```
@@ -184,7 +184,9 @@ template<typename _Res>
 	return *_M_result;
       }
 ```
-这里实际上是利用自旋锁和linux的futex系统调用来实现异步。我们就不展开分析了。
+_M_complete_async是一个虚函数，对于promise的场景下，其实没有任何行为。他是为了其他派生的shared state使用的。比如后面会提到的async, async使用的派生的shared state对象就自己实现了_M_complete_async, 用于等待其他线程，或者延迟执行函数。
+
+_M_load_when_equal用于和provider之间同步，当provider侧通知到future这边，就可以从_M_result获取数据了。这里实际上是利用自旋锁和linux的futex系统调用来实现异步。我们就不展开分析了。
 
 `__State_base`是一个比较关键的类，是provider和future交互的手段，也是整个`promise/future`模型最关键的部分。关于如何设置数据，我们下面讲到promise的数据会继续讨论。
 
@@ -581,6 +583,12 @@ setter本身就简单很多了, 实际上利用仿函数`_Setter`来处理有数
 
     };
 ```
+
+## shared state
+其实我们上面已经很多次提到shared state了。`_State_base`是一个非常关键的对象，我们再来总结一下他和他的派生类：
+1. `_State_base`/`_State_baseV2` : 基类，promise使用的对象。
+2. `_Task_state_base`/`_Task_state` : packaged_task使用的派生对象。
+3. `_Async_state_impl`/`_Async_state_commonV2`/`_Deferred_state` : async使用的派生对象。
 
 ## 总结
 到此为止，我们分析完了`std`标准库对于`future/promise`模型的实现，本质上来说这是一个生产者/消费者的管道式模型。
