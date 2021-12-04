@@ -11,8 +11,8 @@ folly的future一个非常重要的改进是通过`thenValue`和`thenTry`（以�
 folly的future/promise模型在`folly`/`futures`目录下。主要的类包括：
 1. `Future`
 2. `Promise`
-3. `Executor`类
-3. ...
+3. `Executor`
+4. ...
 
 因为folly本身也在不断发展，本文以`v2021.10.04.00`版本为准，可能在某些类和函数的实现上和其他文章略有不同。
 
@@ -52,20 +52,103 @@ Future<int> foo2(const Try<int>& t) {
 
 细心的读者可以发现，我们在创建回调链的时候，使用了`move(f1)`, 直接使用`f1`可以吗？`folly`并不允许，整个chain都是基于右值的。
 
-## Fiber, Baton & other basic object
+## `Fiber`, `Baton` & other basic object
+### `Fiber`
+fiber是一个比较新的名词，中文称作纤程，他和协程`coroutine`其实是相同的概念，都代表用户态的轻量级异步任务。多个fiber可以运行在一个系统线程上，由fiber manager去进行调度，切换合适的fiber上下文。这种调度是非常轻量级的，按照facebook的说法，1s可以切换2亿次的样子。
 
+facebook在`folly`库里实现了自己的`Fiber`, 在`folly/fibers`目录下。主要包括：
+1. `Fiber` : 纤程对象，每个`Fiber`对象都关联着一个`FiberManager`, 且只能被一个task执行一次。
+2. `FiberManager` : Fiber调度器。
+3. `Baton` : low level的异步信号量，`Baton`被用于fiber task之间的互相通知和等待。`Baton`两个最基本的操作是`wait()`和`post()`。
 
+关于`Fiber`我们后面单独再分析源码实现。在这里提到，主要是因为`Future`的底层实现用到了baton。当我们泛化`Promise`的时候，第二个模板参数就是baton。
+
+一个简单的`Fiber`使用示例。
+```
+    folly::EventBase evb;
+    folly::fibers::Baton baton;
+    auto& fibermgr = folly::fibers::getFiberManager(evb);
+    fibermgr.addTask([&](){
+        std::cout << "Task 1: start" << std::endl;
+        baton.wait();
+        std::cout << "Task 1: after baton.wait()" << std::endl;
+    });
+    fibermgr.addTask([&](){
+        std::cout << "Task 2: start" << std::endl;
+        baton.post();
+        std::cout << "Task 2: after baton.post()" << std::endl;
+    });
+
+    evb.loop();
+```
 
 ## Try
+`Try`是对`Future`中存储的数据、异常或nothing的封装, 被大量运用于`Future`的底层和接口，虽然大多数情况下我们并不需要自己去创建`Try`对象，但熟悉Try是熟练掌握`Future`的必要前提。
 
+我们先来看`Try`的实现。
+```
+template <class T>
+class Try {
+  static_assert(
+      !std::is_reference<T>::value, "Try may not be used with reference types");
 
+  enum class Contains {
+    VALUE,
+    EXCEPTION,
+    NOTHING,
+  };
+  ...
+
+  Contains contains_;
+  union {
+    T value_;
+    exception_wrapper e_;
+  };
+};
+```
+可以显然看到，`Try`是通过来enum `Contains`来区分存储数据的类型的，具体的数据则存储在union中，共享同一份空间。
+
+`Try`的作用有一点类似std标准库中的shard state，实现了shared state存储数据的功能，但显然简洁干净了很多。
+
+`Try`的关键函数有(对于相似的函数族，只列出最常用的一个)：
+|方法|返回值|说明|
+|-|-|-|
+|`value()`|`T&`/`T&&`|获取`Try`存储的值(的引用)。如果存储的并不是值类型，则抛出异常。|
+|`operator*`/`operator->`|和`value()`用处一样，都可以用于获取存储值的引用/指针|
+|`has_value()`|`bool`|判断是否存储的是值|
+|`hasException()`|`bool`|判断是否存储的是异常|
+|`exception()`|`exception_wrapper`|获取存储异常的wrapper封装。关于`exception_wrapper`我们后面再说。|
+|`withException(F func)`|`bool`|如果存储的是异常，则执行func F|
+|`get()`|`T`/`Try<T>`|获取`Try`存储的值，或者`Try`本身，这里利用了`enable_if`来实现模板的多态。|
+
+`get()`函数的实现值得我们学习一下。`enable_if`骚操作。
+```
+  template <bool isTry, typename R>
+  typename std::enable_if<isTry, R>::type get() {
+    return std::forward<R>(*this);
+  }
+
+  template <bool isTry, typename R>
+  typename std::enable_if<!isTry, R>::type get() {
+    return std::forward<R>(value());
+  }
+```
+关于`enable_if`，有一篇文章可以学习一下。https://blog.csdn.net/jeffasd/article/details/84667090
 
 ## Future
-folly定义了2种future类: `Future`和`SemiFuture`。
+按照facebook官方paper对于future的定义，future被分为了2种，semifuture和continuable future。( http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0904r0.pdf)
 
-comsumer侧(等同于`std`中的provider)通常生成的是`SemiFuture`, 而不是`Future`。我们需要使用`via()`函数去将`SemiFuture`转成`Future`, 来构建后续的回调链。`via`函数会指定当前`Future`使用的executor, 实际上我们是通过executor去制定了未来future的执行行为。
+semiuture代表一个未来可访问的值(future value), 只有它有能力访问这个值, 很类似std标准库中的future。我们可以通过via操作来指定一个semifuture和对应的executor，去获得一个continable future。semifuture不会直接关联executor, 因此semifuture本身是无法支持链式调用的。
 
-举个例子，在我们上面的例子里面，我们使用`getFuture()`去从`Promise`对象中生成了一个`Future`对象。看起来似乎我们并没有用到`SemiFuture`, 但实际上`getFuture()`函数内部首先调用`getSemiFuture()`函数去生成了一个`SemiFuture`对象，然后指定默认的`InlineExecutor`作为executor从`SemiFuture`对象生成`Future`对象。关于各种executor，我们后面再介绍。
+continuable future则是新推出的概念，顾名思义，他支持了continuation，因此可以链式调用。每个continuable future都绑定了一个executor, 我们可以利用then/collect/...去简洁地在不同的executor上去执行我们的并发逻辑。
+
+executor的引入，让future可以不再局限于标准库的`std::thread`, 将两者合理的解耦了。
+
+回到`folly`, `folly`定义了2种future: `SemiFuture`和`Future`。
+
+comsumer侧(等同于`std`中的provider)通常生成的是`SemiFuture`, 而不是`Future`。我们需要使用`via()`函数去将`SemiFuture`转成`Future`, 来构建后续的回调链。`via()`函数会指定当前`Future`使用的executor, 实际上我们是通过executor去制定了未来future的执行行为。
+
+举个例子，在我们最上面的例子里面，我们使用`getFuture()`去从`Promise`对象中生成了一个`Future`对象。看起来似乎我们并没有用到`SemiFuture`, 但实际上`getFuture()`函数内部首先调用`getSemiFuture()`函数去生成了一个`SemiFuture`对象，然后指定默认的`InlineExecutor`作为executor从`SemiFuture`对象生成`Future`对象。关于各种executor，我们后面再介绍。
 
 
 (TBD)
@@ -80,90 +163,25 @@ class Promise {
  public:
   typedef T value_type;
   typedef BatonT baton_type;
-
-  ~Promise();
-
-  // not copyable
-  Promise(const Promise&) = delete;
-  Promise& operator=(const Promise&) = delete;
-
-  // movable
-  Promise(Promise&&) noexcept;
-  Promise& operator=(Promise&&);
-
-  /** Fulfill this promise (only for Promise<void>) */
-  void setValue();
-
-  /** Set the value (use perfect forwarding for both move and copy) */
-  template <class M>
-  void setValue(M&& value);
-
-  /**
-   * Fulfill the promise with a given try
-   *
-   * @param t A Try with either a value or an error.
-   */
-  void setTry(folly::Try<T>&& t);
-
-  /** Fulfill this promise with the result of a function that takes no
-    arguments and returns something implicitly convertible to T.
-    Captures exceptions. e.g.
-
-    p.setWith([] { do something that may throw; return a T; });
-  */
-  template <class F>
-  void setWith(F&& func);
-
-  /** Fulfill the Promise with an exception_wrapper, e.g.
-    auto ew = folly::try_and_catch([]{ ... });
-    if (ew) {
-      p.setException(std::move(ew));
-    }
-    */
-  void setException(folly::exception_wrapper);
-
-  /**
-   * Blocks task execution until given promise is fulfilled.
-   *
-   * Calls function passing in a Promise<T>, which has to be fulfilled.
-   *
-   * @return data which was used to fulfill the promise.
-   */
-  template <class F>
-  static value_type await_async(F&& func);
-
-#if !defined(_MSC_VER)
-  template <class F>
-  FOLLY_ERASE static value_type await(F&& func) {
-    return await_sync(static_cast<F&&>(func));
-  }
-#endif
+  ...
 
  private:
-  Promise(folly::Try<T>& value, BatonT& baton);
   folly::Try<T>* value_;
   BatonT* baton_;
+  ...
 
-  void throwIfFulfilled() const;
-
-  template <class F>
-  typename std::enable_if<
-      std::is_convertible<invoke_result_t<F>, T>::value &&
-      !std::is_same<T, void>::value>::type
-  fulfilHelper(F&& func);
-
-  template <class F>
-  typename std::enable_if<
-      std::is_same<invoke_result_t<F>, void>::value &&
-      std::is_same<T, void>::value>::type
-  fulfilHelper(F&& func);
 };
 ```
+(TBD)
 
 ### `SharedPromise`
 
 ## Continuation
 (TBD)
+
+## ExceptionWrapper
+(TBD)
+
 # TBD
 
 
