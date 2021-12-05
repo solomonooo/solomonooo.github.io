@@ -152,7 +152,7 @@ comsumer侧(等同于`std`中的provider)通常生成的是`SemiFuture`, 而不�
 
 
 (TBD)
-## Try & Executor
+## Executor
 (TBD)
 
 ## Promise
