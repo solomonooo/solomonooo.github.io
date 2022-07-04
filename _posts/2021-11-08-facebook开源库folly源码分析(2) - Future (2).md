@@ -167,8 +167,8 @@ class FutureBase {
 |移动构造|支持|支持||
 |wait|支持|不支持|阻塞调用者线程直到Future对象ready|
 |get/getTry|支持|支持|SemiFuture不支持getVia|
-|via|支持，返回Future|支持|
-|then/thenTry/thenError|不支持|支持|
+|via|支持，返回Future|支持|可以指定executor|
+|then/thenTry/thenError|不支持|支持||
 |defer|支持|不支持||
 |onError/onTimeout|不支持|支持||
 |within|支持|支持||
@@ -183,9 +183,32 @@ template <class T>
 T SemiFuture<T>::get() && {
   return std::move(*this).getTry().value();
 }
-```
 
-总的来看，其实folly的future本身数据很简单，核心的设计主要在`Core`对象上。
+template <class T>
+Try<T> SemiFuture<T>::getTry() && {
+  wait();
+  auto future = folly::Future<T>(this->core_);
+  this->core_ = nullptr;
+  return std::move(std::move(future).result());
+}
+
+template <class T>
+Try<T>& FutureBase<T>::result() & {
+  return getCoreTryChecked();
+}
+
+template <typename Self>
+static decltype(auto) getCoreTryChecked(Self& self) {
+  auto& core = self.getCore();
+  if (!core.hasResult()) {
+    throw_exception<FutureNotReady>();
+  }
+  return core.getTry();
+}
+```
+通过一系列的调用，最后调用了core的getTry去获取数据。总的来看，其实folly的future本身数据很简单，核心的设计主要在`Core`对象上。
+
+这里需要注意的是，在`getTry`的时候，首先调用了`wait()`来等待数据ready，这里其实是一个非常重要的设计，可以说，基本所有future的异步操作，最后都依赖于获取数据时的wait，cosumer会在这里等待数据的处理完成。我们后面再来说wait。
 
 ### Core 
 `Core`对象对应std中的shared state, 这是整个框架里最重要的类，他用来实现future和promise直接状态的共享和通知。
@@ -340,7 +363,68 @@ void Promise<T>::setInterruptHandler(F&& fn) {
 
 说完了`CoreBase`，让我们回到本章的主角，`Core`。`Core`作为一个派生类，并没有自己特有的数据成员，但是提供了很多自己的方法，来满足框架的需求。比如我们之前提到的make,还有Continuation底层相关的`setCallback`和`setResult`。
 
-关于`Core`的实现细节还有很多，留待以后吧。
+`Core`提供了一些重要的操作数据的方法，被广泛用于promise/future中，基本如下：
+|方法|返回值|说明|
+|-|-|-|
+|make|Core*|创建一个core对象，主要是内部使用.|
+|getTry|Try<T>&|comsumer使用，获取数据（或者异常）|
+|setResult|Try<T>&|producer使用，设置数据（或者异常）|
+|setCallback|void|顾名思义|
+
+先来看`setResult`，这是填充数据或异常的底层操作。例如在promise调用`setValue`填充数据时，实际上底层调用的就是core的`setResult`。`setResult`先设置数据，然后内部调用了基类的`setResult_()`去同步状态和处理callback，这里主要是使用了上面提到的atomic state状态机。
+```
+  void setResult(Try<T>&& t) {
+    setResult(Executor::KeepAlive<>{}, std::move(t));
+  }
+
+  void setResult(Executor::KeepAlive<>&& completingKA, Try<T>&& t) {
+    ::new (&this->result_) Result(std::move(t));
+    setResult_(std::move(completingKA));
+  }
+```
+然后来看`getTry`，这是获取数据或异常的底层操作。例如在future调用`get()`的时，实际上底层调用的就是core的`getTry`。它的实现并不复杂，从core->result_中获取数据。
+```
+  Try<T>& getTry() {
+    DCHECK(hasResult());
+    auto core = this;
+    while (core->state_.load(std::memory_order_relaxed) == State::Proxy) {
+      core = static_cast<Core*>(core->proxy_);
+    }
+    return core->result_;
+  }
+```
+
+关于`Core`的实现细节还有很多，留待以后吧。(TBD)
+
+### wait
+future的很多操作，都需要我们等待异步操作完成，数据被填充后继续执行，这个机制是在`get()`的时候调用`wait()`实现的，其底层使用了`Baton`。
+```
+template <class T>
+Future<T>&& Future<T>::wait() && {
+  futures::detail::waitImpl(*this);
+  return std::move(*this);
+}
+```
+可以看到`wait`直接调用了`waitImpl`,我们再来看`waitImpl`的实现。
+```
+template <class FutureType, typename T = typename FutureType::value_type>
+void waitImpl(FutureType& f) {
+  //一些优化操作
+  ...
+  Promise<T> promise;
+  auto ret = convertFuture(promise.getSemiFuture(), f);
+  FutureBatonType baton;
+  f.setCallback_([&baton, promise = std::move(promise)](
+                     Executor::KeepAlive<>&&, Try<T>&& t) mutable {
+    promise.setTry(std::move(t));
+    baton.post();
+  });
+  f = std::move(ret);
+  baton.wait();
+  assert(f.isReady());
+}
+```
+可以看到这里使用baton来完成等待的操作, baton是folly提供的通知等待机制，这里就不详细解释了。简单来说，baton的`wait()`会等待通知，直到`post()`被调用为止。可以看到这里注册了一个callback，在数据或异常被填充后调用，最终通知回waitImpl里。
 
 ## Promise
 folly基于`folly::Try`实现了自己的promise。相对于std标准库，folly的实现非常清晰。
