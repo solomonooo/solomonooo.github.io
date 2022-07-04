@@ -175,7 +175,14 @@ class FutureBase {
 
 `SemiFuture`和`Future`都可以通过makeFuture的方式来创建，他们也可以互相转换。 `SemiFuture`可以通过`toUnsafeFuture()`转成`Future`, `Future`当然也可以通过`semi()`转成`SemiFuture`。
 
-在和`Promise`配合使用的时候，很多时候我们并不用特殊的区分这两者。我们既可以使用promise的`getSemiFuture()`方法去获得semiFuture，也可以通过`getFuture()`方法去直接获得future(默认使用了inline executor)。但这2个方法都被deprecated了，取代他们的是`folly::makePromiseContract()`。
+在和`Promise`配合使用的时候，很多时候我们并不用特殊的区分这两者。我们既可以使用promise的`getSemiFuture()`方法去获得semiFuture，也可以通过`getFuture()`方法去直接获得future(默认使用了inline executor)。但这2个方法都被deprecated了，取代他们的是`folly::makePromiseContract()`。举个例子:
+```
+    auto [p, f] = folly::makePromiseContract<int>(&InlineExecutor::instance());
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    p.setValue(3);
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    cout<<"final f = "<<f.value()<<endl;
+```
 
 当我们想获取future/semi future中的数据的时候，直接使用get就可以获得。实现的时候，则是通过获得底层的try，然后实现的。相比std而言，是简单很多了。举个例子。
 ```
@@ -458,7 +465,7 @@ class Promise {
 |setValue|void|填充数据到promise里|
 |setTry|void|填充try到promise里，比较通用的方法|
 |isFulfilled|bool|是否promise已经被填充了|
-之前我们提到了，`getSemiFuture`和`getFuture`已经被deprecated了，folly推荐使用`makePromiseContract`。其实它只是一个简单的封装，用来规范我们对promise/future的使用。
+Promise的实现保证了`getSemiFuture`和`GetFuture`都只可以被调用一次, 如果非法调用，则会抛出异常`folly::FutureAlreadyRetrieved`。另外，`getSemiFuture`和`getFuture`已经被deprecated了，folly推荐使用`makePromiseContract`。其实它只是一个简单的封装，用来规范我们对promise/future的使用。
 ```
 template <class T>
 std::pair<Promise<T>, SemiFuture<T>> makePromiseContract() {
@@ -470,27 +477,17 @@ std::pair<Promise<T>, SemiFuture<T>> makePromiseContract() {
 promise的核心操作是set系列函数，都是通过core指针的`setResult`实现的。这里就不赘述了。
 
 ### `SharedPromise`
+folly也提供了shared promise，和std的实现类似，`SharedPromise`可以通过`getFuture()`获取多次future。
 
-### promise in fibers
-fibers定义了自己的promise。
-```
-template <typename T, typename BatonT = Baton>
-class Promise {
- public:
-  typedef T value_type;
-  typedef BatonT baton_type;
-  ...
+实际上`SharedPromise`是通过封装`Promise`来实现的，其内部维护了一个promise的vector, 通过mutex来解决并发问题。
 
- private:
-  folly::Try<T>* value_;
-  BatonT* baton_;
-  ...
+这里我们就不详细分析了。
 
-};
-```
-可以看到promise的成员只有2个，一个保存数据的`Try`对象`value`, 一个是Baton指针。
+### promise in fibers 
+folly在fibers中，也定义了一个`Promise`, 服务于fibers。
+`fibers::Promise`和原版的`Promise`类似，也提供了`setValue`/`setTry`这种填充数据的方法，但并不能extract出future对象来。他主要配合`await_async`来实现异步task。
+`fibers::Promise`的实现并不复杂，但他的泛化需要2个参数，数据类型T和Baton。鉴于和fibers还有baton的关系比较紧密，等以后我们分析fibers的时候再来看看。
 
-(TBD)
 #### `Fiber`
 fiber是一个比较新的名词，中文称作纤程，他和协程`coroutine`其实是相同的概念，都代表用户态的轻量级异步任务。多个fiber可以运行在一个系统线程上，由fiber manager去进行调度，切换合适的fiber上下文。这种调度是非常轻量级的，按照facebook的说法，1s可以切换2亿次的样子。
 
@@ -498,8 +495,6 @@ facebook在`folly`库里实现了自己的`Fiber`, 在`folly/fibers`目录下。
 1. `Fiber` : 纤程对象，每个`Fiber`对象都关联着一个`FiberManager`, 且只能被一个task执行一次。
 2. `FiberManager` : Fiber调度器。
 3. `Baton` : low level的异步信号量，`Baton`被用于fiber task之间的互相通知和等待。`Baton`两个最基本的操作是`wait()`和`post()`。
-
-关于`Fiber`我们后面单独再分析源码实现。在这里提到，主要是因为fibers的`Future`的底层实现用到了baton。当我们泛化`Promise`的时候，第二个模板参数就是baton。
 
 一个简单的`Fiber`使用示例。
 ```
@@ -519,8 +514,6 @@ facebook在`folly`库里实现了自己的`Fiber`, 在`folly/fibers`目录下。
 
     evb.loop();
 ```
-
-
 ## Continuation
 前面已经提到，folly和std最大的区别就是支持了continuation, 通俗地说，就是链式调用。
 

@@ -137,7 +137,7 @@ template<typename _Res>
 
     /// A result object that has storage for an object of type _Res.
     template<typename _Res>
-      struct _Result : _Result_base
+ v    struct _Result : _Result_base
       {
       private:
 	__gnu_cxx::__aligned_buffer<_Res>	_M_storage;
