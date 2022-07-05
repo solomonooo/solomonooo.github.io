@@ -154,10 +154,10 @@ class FutureBase {
 `FutureBase`主要的功能就是封装了`Core`对象，future和promise之间的数据共享都是依靠`Core`来工作的。这里存储的是core对象的指针，方便移动构造。
 
 `FutureBase`作为基类，提供了很多通用的方法便于使用，其中其实大部分都基于Try。一些重要的方法如下:
-|方法|返回值|说明|
-|-|-|-|
-|value|T&/T&&||
-|result|Try<T>&/Try<T>&&||
+| 方法 | 返回值 | 说明 |
+| - | - | - |
+| value | T&/T&& | |
+| result | Try<T>&/Try<T>&& | |
 |is_ready|bool||
 |hasValue|bool||
 |hasException|bool||
@@ -690,7 +690,7 @@ facebook在`folly`库里实现了自己的`Fiber`, 在`folly/fibers`目录下。
 总的来说，作为异步task的编排，continuation确实很方便，很直观的显示task的执行过程。但其实仔细思考我们就会发现，我们其实没有提及这些异步task或者future具体是如何被执行的，多个then操作，他们在同一个线程执行吗？还是不同的线程？这就要引入folly的promise/future框架一个很重要的东西：executor。
 
 ## Executor
-在std中，promise/future的并没有过多的触及执行和调度的问题，虽然框架的成熟度是一个原因，但主要还是历史原因。c++委员会一直在致力于让promise/future更加的generic，整个任务图框架是一个漫长的演进过程。Executor提案就是中间的一步。
+在std中，promise/future的并没有过多的触及执行和调度的问题，虽然框架的成熟度是一个原因，但主要还是历史原因。c++委员会一直在致力于让promise/future更加的generic，整个任务图框架是一个漫长的演进过程。Executor提案P0443R14就是中间的一步。
 
 Executor这个概念，主要是用于执行过程的抽象，对于任务图本身而言，我们为什么要关心如何执行调度呢？是多线程，还是内联，是使用CPU，还是GPU，这些其实都不是任务执行者关心的，对于consumer而言，他关心的是结果，是顺序，是我想做什么，而并非调度的细节。Executor将调度的细节隐藏了起来，对外提供了抽象统一的接口。
 
