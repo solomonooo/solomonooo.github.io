@@ -55,6 +55,7 @@ Future<int> foo2(const Try<int>& t) {
 ## Try
 `Try`是对`Future`中存储的数据、异常或nothing的封装, 被大量运用于`Future`的底层和接口，虽然大多数情况下我们并不需要自己去创建`Try`对象，但熟悉Try是熟练掌握`Future`的必要前提。
 
+### Try的实现原理
 我们先来看`Try`的实现。
 ```
 template <class T>
@@ -130,6 +131,10 @@ comsumer侧(等同于`std`中的provider)通常生成的是`SemiFuture`, 而不�
 
 在老的代码里，一般都用`makeFuture()`创建一个Future, 但这种写法在folly里已经被deprecated了，代替他的是`makeSemiFuture()`, folly推荐用semiFuture并配合via指定executor来使用future。不管哪一种方法，在底层都是new了一个`Core`对象，并用于创建对应的future。
 
+### future的使用示例
+future提供了`result()`和`value()`方便获取其中的数据或者异常，本文开头的简单示例中就展示了如何利用`value()`获取数据。更多的高级特性主要还是实现了continuation。关于这部分的使用，可以直接参考Continuation这一章。
+
+### future的实现原理
 `Future`和`SemiFuture`有着共同的基类`FutureBase`,其定义如下：
 ```
 template <class T>
@@ -434,6 +439,40 @@ void waitImpl(FutureType& f) {
 可以看到这里使用baton来完成等待的操作, baton是folly提供的通知等待机制，这里就不详细解释了。简单来说，baton的`wait()`会等待通知，直到`post()`被调用为止。可以看到这里注册了一个callback，在数据或异常被填充后调用，最终通知回waitImpl里。
 
 ## Promise
+在定义上，folly的promise和std没有本质区别，其代表producer端数据的opreation接口。
+### promise的使用示例
+对于promise而言，我们既可以填充数据，也可以填充异常。promise重载了很多版本的set函数方便来使用，我们只挑选经典的几个看下。
+
+填充数据的例子。
+```
+    Promise<int> p;
+    cout<<"is promise fullfilled ? "<<p.isFulfilled()<<endl;
+    auto f = p.getFuture();
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    p.setValue(123);
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    cout<<"f = "<<f.value()<<endl;
+```
+填充异常的例子：
+```
+    Promise<int> p;
+    cout<<"is promise fullfilled ? "<<p.isFulfilled()<<endl;
+    auto f = p.getFuture();
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    p.setException(std::runtime_error("my exception"));
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    cout<<"has exception ?  "<<f.hasException()<<endl;
+    //when call f.value(), throw exception.
+```
+promise其实还可以直接传入无参函数来填充数据。
+```
+    Promise<int> p;
+    auto f = p.getFuture();
+    p.setWith([]{
+        return 123;
+    });
+```
+### promise的实现原理
 folly基于`folly::Try`实现了自己的promise。相对于std标准库，folly的实现非常清晰。
 ```
 template <class T>
@@ -515,22 +554,151 @@ facebook在`folly`库里实现了自己的`Fiber`, 在`folly/fibers`目录下。
     evb.loop();
 ```
 ## Continuation
-前面已经提到，folly和std最大的区别就是支持了continuation, 通俗地说，就是链式调用。
+前面已经提到，folly和std最大的区别就是支持了continuation, 通俗地说，就是链式调用。folly提供了很多方法来实现continuation，一部分是future提供的方法，一部分是全局方法。
 
-让我们来看一个简单的例子。
+重要的方法如下：
+|方法|说明|
+|-|-|
+|via|指定executor执行|
+|then/thenTry/thenValue|future complete时执行|
+|thenInline/thenTryInline/thenValueInline|同上,只是使用同一executor|
+|thenError|当future有exception时执行|
+|onError/onTimeout/ensure|很直观的含义，onError已经被thenError代替|
+|within/delayed|加上时间控制的continuation|
+|get/wait|其实不属于continuation，主要用于等待future被fullfilled|
+|filter|用于filter，不满足条件的值会抛异常|
+|mapValue/mapTry/reduce|没什么好说的,实现了map-reduce|
+|collectAll/collectAllUnsafe|所有的输入future complete才继续执行,需要特殊注意的是返回值是semi future, unsafe版本才是future|
+|collectAny|任意一个future complete就继续执行|
+|collectN|没什么好说的|
+|collect|等待输入future complete直到异常发生|
+|window||
+|whileDo||
+
+上面列的每个方法，都有很多重载的版本来方便使用，其中then系列和collect系列是使用最广泛的方法。我们可以通过一系列例子来看如何使用。
+
+这是一个比较经典的级联场景。
 ```
+    cout << "make future chain" <<endl;
     auto f1 = makeFuture(1);
     auto f2 = move(f1).thenValue(foo1).then(foo2).thenValue(foo3);
+    cout << "future chain made" <<endl;
 ```
-我们创建了一个semi future f1,
+当我们需要处理一些异常的时候，可以使用thenError去处理异常。当输入的future被正常填充数据时，thenError不会被触发，但一旦异常发生，就会进入thenError的处理逻辑。
+```
+    auto f1 = makeFuture<int>(1);
+    auto f2 = move(f1).thenValue([](int x){
+        //some unexpected happened.
+        throw std::runtime_error("oh no!");
+        return makeFuture<int>(x+1);
+    })
+    .thenError([](const auto& e){
+        cout<<"exception : "<<e.what()<<endl;
+        return -1;
+    });
+    cout << "future fulfilled, res = " <<f2.value()<<endl;
+
+    exception : std::runtime_error: oh no!
+    future fulfilled, res = -1
+```
+其实thenError非常类似传统的异常处理机制，thenError相当于catch，可以用来捕获异常（当然也可以继续抛出异常），folly也同时提供了类似finally的ensure函数。我们来看一个复杂的例子。
+```
+    auto f1 = makeFuture<int>(1);
+    auto f2 = move(f1).thenValue([](int x){
+        throw std::runtime_error("oh no!");
+        return makeFuture<int>(x+1);
+    })
+    .thenError([](const auto& e){
+        cout<<"exception : "<<e.what()<<endl;
+        throw std::invalid_argument("oh no again!");
+        return -1;
+    })
+    .thenError([](const auto& e){
+        cout<<"exception : "<<e.what()<<endl;
+        return -2;
+    })
+    .ensure([](){
+        cout<<"my final work!"<<endl;
+    });
+
+    cout << "future fulfilled, res = " <<f2.value()<<endl;
+```
+
+仅仅是支持级联是无法满足复杂的场景的，folly还提供了一些高级方法去处理并行task。例如，collect系列函数，其中使用最多的是`collectAll`。`collectAll`会等待直到所有的输入future都complete。需要注意的是，`collectAll`的输出是semi future，我们可以通过toUnsafeFuture()来转换成future，或者直接使用`collectAllUnsafe`。
+```
+    std::vector<Future<int>> fv;
+    for (int i = 0; i < 10; i++){
+        fv.emplace_back(makeFuture(i));
+    }
+
+    auto f = folly::collectAll(fv)
+        .toUnsafeFuture()
+        .thenValue([](const std::vector<Try<int>>& trys){
+            int res = 0;
+            for (size_t i = 0; i < trys.size(); i++){
+                int cur = trys[i].value();
+                cout<<"f"<<i<<" = "<<cur<<endl;
+                res += cur;
+            }
+            return makeFuture(res);
+        });
+
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    cout<<"final f = "<<f.value()<<endl;
+```
+`collectAny`和`collectAll`功能类似,但他只会等待到input future中有一个complete就可以。需要注意的是他们的输出其实略有区别。`collectAll`的输出是一个Try的vector的集合，但`collectAny`的输出却是一个pair。很合理。
+```
+    std::vector<Future<int>> fv;
+    for (int i = 0; i < 10; i++){
+        fv.emplace_back(makeFuture(i));
+    }
+
+    auto f = folly::collectAny(fv)
+        .toUnsafeFuture()
+        .thenValue([](const std::pair<size_t, Try<int>>& trys){
+            int res = trys.second.value();
+            cout<<"f"<<trys.first<<" = "<<res<<endl;
+            return makeFuture(res);
+        });
+
+    cout<<"is future ready ? "<<f.isReady()<<endl;
+    cout<<"final f = "<<f.value()<<endl;
+```
+出人意料的，folly其实还提供了map/reduce方法。
+
+`mapValue`的输入future的vector，其中每个元素都会被被传入的func参数处理成新的future。而`reduce`的输入同样是future的vector，但输出则是一个单独的future。举个例子：
+```
+    std::vector<Future<int>> fv;
+    for (int i = 0; i < 10; i++){
+        fv.emplace_back(makeFuture(i));
+    }
+
+    std::vector<Future<int>> fv2 = futures::mapValue(fv, [](int i){
+        return makeFuture(i+1);
+    });
+```
+```
+    std::vector<Future<int>> fv;
+    for (int i = 0; i < 10; i++){
+        fv.emplace_back(makeFuture(i));
+    }
+
+    Future<double> f = folly::reduce(fv, 0.0, [](double a, int&& b){
+        return a+b*10;
+    });
+```
+总的来说，作为异步task的编排，continuation确实很方便，很直观的显示task的执行过程。但其实仔细思考我们就会发现，我们其实没有提及这些异步task或者future具体是如何被执行的，多个then操作，他们在同一个线程执行吗？还是不同的线程？这就要引入folly的promise/future框架一个很重要的东西：executor。
 
 ## Executor
-(TBD)
+在std中，promise/future的并没有过多的触及执行和调度的问题，虽然框架的成熟度是一个原因，但主要还是历史原因。c++委员会一直在致力于让promise/future更加的generic，整个任务图框架是一个漫长的演进过程。Executor提案就是中间的一步。
+
+Executor这个概念，主要是用于执行过程的抽象，对于任务图本身而言，我们为什么要关心如何执行调度呢？是多线程，还是内联，是使用CPU，还是GPU，这些其实都不是任务执行者关心的，对于consumer而言，他关心的是结果，是顺序，是我想做什么，而并非调度的细节。Executor将调度的细节隐藏了起来，对外提供了抽象统一的接口。
+
+folly对executor提案给出了自己的实现方案。目前folly支持了下面几种executor(当然，他们都有统一的抽象基类):
+1. InlineExecutor（默认）
+2. （TBD)
 
 
-
-## ExceptionWrapper
-(TBD)
 
 # TBD
 
