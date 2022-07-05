@@ -82,6 +82,7 @@ class Try {
 `Try`的作用有一点类似std标准库中的`_Result`(定义shard state里），实现了存储数据的功能，但显然清晰了很多。比起std使用static_cast强制转换成目标类型，Try直接就保存了类型信息。`_Result`广泛用于share state中，同样的，在folly中也有对应share state的设计，叫做`Core`对象，`Try`也广泛应用于`Core`中。关于`Core`我们后面会再来看。
 
 `Try`的关键函数有(对于相似的函数族，只列出最常用的一个)：
+
 |方法|返回值|说明|
 |-|-|-|
 |`value()`|`T&`/`T&&`|获取`Try`存储的值(的引用)。如果存储的并不是值类型，则抛出异常。|
@@ -166,6 +167,7 @@ class FutureBase {
 |getExecutor|Executor*|获取core对象的executor|
 
 `SemiFuture`和`Future`都继承了`FutureBase`，从数据上来说，他们基本没有区别，他们的区别主要在于各自的行为上，作为子类，他们分别实现了不同的构造，赋值，移动和各自的特性。举个例子，只有`Future`支持Continuation。关于Continuation，后面我们专门来分析。
+
 |功能|SemiFuture|Future|说明|
 |-|-|-|-|
 |construct from value|支持|支持||
@@ -377,6 +379,7 @@ void Promise<T>::setInterruptHandler(F&& fn) {
 说完了`CoreBase`，让我们回到本章的主角，`Core`。`Core`作为一个派生类，并没有自己特有的数据成员，但是提供了很多自己的方法，来满足框架的需求。比如我们之前提到的make,还有Continuation底层相关的`setCallback`和`setResult`。
 
 `Core`提供了一些重要的操作数据的方法，被广泛用于promise/future中，基本如下：
+
 |方法|返回值|说明|
 |-|-|-|
 |make|Core*|创建一个core对象，主要是内部使用.|
@@ -496,6 +499,7 @@ class Promise {
 ```
 实际上promise中只有2个成员，其中最主要的是shared state对象指针`core_`。基本上所有的promise的操作都是利用core完成的。
 `Promise`实现了一些重要的方法，如下:
+
 |方法|返回值|说明|
 |-|-|-|
 |getSemiFuture|SemiFuture<T>|deprecated. 推荐使用makePromiseContract.|
@@ -558,6 +562,7 @@ facebook在`folly`库里实现了自己的`Fiber`, 在`folly/fibers`目录下。
 前面已经提到，folly和std最大的区别就是支持了continuation, 通俗地说，就是链式调用。folly提供了很多方法来实现continuation，一部分是future提供的方法，一部分是全局方法。
 
 重要的方法如下：
+
 |方法|说明|
 |-|-|
 |via|指定executor执行|
