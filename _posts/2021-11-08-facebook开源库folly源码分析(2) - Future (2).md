@@ -154,10 +154,11 @@ class FutureBase {
 `FutureBase`主要的功能就是封装了`Core`对象，future和promise之间的数据共享都是依靠`Core`来工作的。这里存储的是core对象的指针，方便移动构造。
 
 `FutureBase`作为基类，提供了很多通用的方法便于使用，其中其实大部分都基于Try。一些重要的方法如下:
-| 方法 | 返回值 | 说明 |
-| - | - | - |
-| value | T&/T&& | |
-| result | Try<T>&/Try<T>&& | |
+
+|方法|返回值|说明|
+|-|-|-|
+|value|T&/T&&||
+|result|Try<T>&/Try<T>&&||
 |is_ready|bool||
 |hasValue|bool||
 |hasException|bool||
