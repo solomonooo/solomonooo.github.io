@@ -693,20 +693,61 @@ facebook在`folly`库里实现了自己的`Fiber`, 在`folly/fibers`目录下。
         return a+b*10;
     });
 ```
-总的来说，作为异步task的编排，continuation确实很方便，很直观的显示task的执行过程。但其实仔细思考我们就会发现，我们其实没有提及这些异步task或者future具体是如何被执行的，多个then操作，他们在同一个线程执行吗？还是不同的线程？这就要引入folly的promise/future框架一个很重要的东西：executor。
+总的来说，作为异步task的编排，continuation确实很方便，很直观的显示task的执行过程。但其实仔细思考我们就会发现，我们其实没有提及这些异步task或者future具体是如何被执行的，多个then操作，他们在同一个线程执行吗？还是不同的线程？
+我们来看一个例子。
+```
+// in thread A
+Promise<int> p;
+auto f = p.getFuture();
+p.setValue(123);
+
+//in thread B
+f.then(x).then(y);
+```
+那么x和y操作到底是在哪个线程执行呢？不幸的是，这个结果是不确定的。如果setValue先发生，那x和y将在b线程执行，如果setValue晚于then操作，那x和y将在a线程执行。如果恰好setValue在两个then中间，那么x和y就可能分别在两个线程中执行。这个不确定性可能会产生问题。
+这就要引入folly的promise/future框架一个很重要的东西：executor。
 
 ## Executor
 在std中，promise/future的并没有过多的触及执行和调度的问题，虽然框架的成熟度是一个原因，但主要还是历史原因。c++委员会一直在致力于让promise/future更加的generic，整个任务图框架是一个漫长的演进过程。Executor提案P0443R14就是中间的一步。
 
-Executor这个概念，主要是用于执行过程的抽象，对于任务图本身而言，我们为什么要关心如何执行调度呢？是多线程，还是内联，是使用CPU，还是GPU，这些其实都不是任务执行者关心的，对于consumer而言，他关心的是结果，是顺序，是我想做什么，而并非调度的细节。Executor将调度的细节隐藏了起来，对外提供了抽象统一的接口。
+Executor这个概念，主要是用于执行过程的抽象，Executor将调度的细节隐藏了起来，对外提供了抽象统一的接口。folly对executor提案给出了自己的实现方案。folly的extractor提供了抽象方法add(std::function<void()> func), 负责func的执行。所有的add方法（以及他们的变体）的实现，都必须遵守线程安全。
 
-folly对executor提案给出了自己的实现方案。目前folly支持了下面几种executor(当然，他们都有统一的抽象基类):
-1. InlineExecutor（默认）
-2. （TBD)
+目前folly实现了下面几种executor:
+1. InlineLikeExecutor: inline风格的抽象类。 
+   1. InlineExecutor（默认）: inline立即执行。
+   2. QueuedImmediateExecutor : 类似inline，但使用threadlocal队列。在其他回调执行过程中的回调不会马上执行，会进入队列缓存起来。
+2. ThreadedExecutor : 启动新线程去执行task。
+3. ThreadPoolExecutor : 使用线程池的抽象类，可以调整线程池大小，自定义线程factory, 信息统计以及其他特性。他的子类实现应该是使用最广泛的executor。
+   1. CPUThreadPoolExecutor: 使用基于folly提供的lifosem和mpmc队列的线程池，可以指定最大最小线程数，支持任务优先级。
+   2. EDFThreadPoolExecutor: 使用基于earliest-deadline-first策略的线程池。
+   3. IOThreadPoolExecutor: 同时继承自IOExecutor，见下面。
+4. DrivableExecutor : 提供drive()方法和Via()配合使用的执行器。
+   1. ManualExecutor : 需要显示执行的executor。
+   2. TimedDrivableExecutor : 基于时间的drivable的executor。
+5. IOExecutor : 使用folly event机制的executor抽象类。
+   1. FiberIOExecutor : 基于fibers的IO Executor。
+   2. IOThreadPoolExecutor : 使用基于event id事件通知的线程池，epoll队列是per thread的，默认一个核一个线程。
+6. ScheduledExecutor : 支持按时间调度的executor。
+7. SequencedExecutor : 保证执行时序的executor的抽象类。
+   1. SerialExecutor : no idea。
+   2. StrandExecutor : no idea x 2。
+8. SoftRealTimeExecutor : 提供基于dealline优先级调度的抽象类。
+   1. EDFThreadPoolExecutor : 同时继承自ThreadPoolExecutor，见上面。
+
+关于executor的实现细节，我们留待下一篇文章和std::execution一起专门分析（P2300R1）。
+
+# 其他
+## DAG
+folly还有一些实验性质的实现，比如DAG，很有意思。但鉴于时间原因，短时间不打算更新了。未来我会回来补充这一部分。
+
+## 说在最后
+folly的promise/future框架还有很多没有探索的部分，比如`Barrier`和`ControlBlock`，关于他们的设计目的和实现细节，我都还没有搞明白。以后有时间可以做一遍拾遗。
+
+在最早打算完成folly的promise/future的源码分析的时候，我的计划是分为三章：第一章详述标准库的实现，第二章描述folly当前的实现，第三章尝试搞清楚c++标准未来异步任务模型的发现，以及当前扩展库的实现(execution)。
+
+第三章可能要花更多的时间，但并不会缺席的。
 
 
-
-# TBD
 
 
 
